@@ -1,6 +1,8 @@
 import AVFoundation
 import UIKit
 import Vision
+import CoreImage
+import CoreImage.CIFilterBuiltins
 
 class ViewController: UIViewController {
     // Capture Session
@@ -75,14 +77,14 @@ class ViewController: UIViewController {
     // Face detection request
     private var faceDetectionRequest: VNDetectFaceLandmarksRequest?
     
-    // Oval mask properties
-    private var ovalRect: CGRect = .zero
-    
     // Throttle photo capture
     private var canTakePhoto = false
     
     // Face rect to maintain blur effect
     private var faceRect: CGRect?
+    
+    // Stored face path from the first image
+    private var storedFacePath: UIBezierPath?
     
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -104,12 +106,7 @@ class ViewController: UIViewController {
         blurEffectView.frame = view.bounds
         overlayView.frame = view.bounds
         
-        let maskHeight = view.frame.size.height * 0.7
-        let maskTopY = view.frame.size.height / 2 - maskHeight / 2 - 50
-        
-        createOvalMask()
-        
-        let promptLabelY = maskTopY + maskHeight - 150
+        let promptLabelY = view.frame.size.height - 150
         
         promptLabel.frame = CGRect(x: 20, y: promptLabelY, width: view.frame.width - 40, height: 60)
         countdownLabel.frame = CGRect(x: 0, y: 0, width: 200, height: 100)
@@ -193,7 +190,6 @@ class ViewController: UIViewController {
         guard let result = results.first else {
             // No face detected
             overlayView.layer.sublayers?.removeAll()
-            createOvalMask()
             return
         }
         
@@ -205,101 +201,124 @@ class ViewController: UIViewController {
                                    size: CGSize(width: faceRect.size.width * size.width,
                                                 height: faceRect.size.height * size.height))
         
-        // Set the faceRect once and create the blur overlay
-        if self.faceRect == nil {
-            self.faceRect = convertedRect
-            createBlurOverlay(for: convertedRect)
-            addReferencePoints(for: result)
+        // Update faceRect and create the blur overlay
+        self.faceRect = convertedRect
+        
+        if photoCount == 1 {
+            createFaceMask(for: result)
+        } else {
+            overlayView.layer.sublayers?.removeAll()
         }
         
-        // Check if the face is within the oval mask
-        if ovalRect.contains(convertedRect) {
+        // Check if the face is within the mask
+        if photoCount == 1, let storedFacePath = self.storedFacePath, storedFacePath.contains(CGPoint(x: convertedRect.midX, y: convertedRect.midY)) {
+            startCountdown()
+        } else if photoCount == 0 {
             startCountdown()
         }
     }
     
-    private func createOvalMask() {
-        let ovalPath = UIBezierPath()
-        let width: CGFloat = view.frame.size.width * 0.9
-        let height: CGFloat = view.frame.size.height * 0.6
-        ovalRect = CGRect(x: view.frame.size.width / 2 - width / 2,
-                          y: view.frame.size.height / 2 - height / 2 - 50, // 50 points above the center
-                          width: width,
-                          height: height)
+    private func createFaceMask(for faceObservation: VNFaceObservation) {
+        guard let landmarks = faceObservation.landmarks else { return }
         
-        ovalPath.append(UIBezierPath(ovalIn: ovalRect))
+        let facePath = UIBezierPath()
+        let size = previewLayer.bounds.size
+        
+        // Helper function to convert normalized points to view points
+        func convertPoints(_ points: [CGPoint], boundingBox: CGRect) -> [CGPoint] {
+            return points.map { point in
+                let x = boundingBox.origin.x * size.width + point.x * boundingBox.size.width * size.width
+                let y = (1 - boundingBox.origin.y) * size.height - point.y * boundingBox.size.height * size.height
+                return CGPoint(x: x, y: y)
+            }
+        }
+        
+        // Add paths for the face contour
+        if let faceContour = landmarks.faceContour {
+            let points = convertPoints(faceContour.normalizedPoints, boundingBox: faceObservation.boundingBox)
+            for (i, point) in points.enumerated() {
+                if i == 0 {
+                    facePath.move(to: point)
+                } else {
+                    facePath.addLine(to: point)
+                }
+            }
+            facePath.close()
+        }
+        
+        storedFacePath = facePath
         
         let maskLayer = CAShapeLayer()
-        maskLayer.path = ovalPath.cgPath
-        maskLayer.fillRule = .evenOdd
+        maskLayer.path = facePath.cgPath
         maskLayer.fillColor = UIColor.clear.cgColor
         maskLayer.strokeColor = UIColor.white.cgColor
         maskLayer.lineWidth = 5
         
+        overlayView.layer.sublayers?.removeAll()
+        overlayView.layer.addSublayer(maskLayer)
+        
         // Create a hole in the blur effect view
         let path = UIBezierPath(rect: blurEffectView.bounds)
-        path.append(UIBezierPath(ovalIn: ovalRect).reversing())
+        path.append(facePath.reversing())
         
         let blurMaskLayer = CAShapeLayer()
         blurMaskLayer.path = path.cgPath
         blurEffectView.layer.mask = blurMaskLayer
+    }
+    
+    private func createHeadMask(for faceObservation: VNFaceObservation) {
+        guard let landmarks = faceObservation.landmarks else { return }
+        
+        let headPath = UIBezierPath()
+        let size = previewLayer.bounds.size
+        
+        // Helper function to convert normalized points to view points
+        func convertPoints(_ points: [CGPoint], boundingBox: CGRect) -> [CGPoint] {
+            return points.map { point in
+                let x = boundingBox.origin.x * size.width + point.x * boundingBox.size.width * size.width
+                let y = (1 - boundingBox.origin.y) * size.height - point.y * boundingBox.size.height * size.height
+                return CGPoint(x: x, y: y)
+            }
+        }
+        
+        // Add paths for the outer head
+        if let faceContour = landmarks.faceContour {
+            let points = convertPoints(faceContour.normalizedPoints, boundingBox: faceObservation.boundingBox)
+            for (i, point) in points.enumerated() {
+                if i == 0 {
+                    headPath.move(to: point)
+                } else {
+                    headPath.addLine(to: point)
+                }
+            }
+            headPath.close()
+        }
+        
+        let maskLayer = CAShapeLayer()
+        maskLayer.path = headPath.cgPath
+        maskLayer.fillColor = UIColor.clear.cgColor
+        maskLayer.strokeColor = UIColor.white.cgColor
+        maskLayer.lineWidth = 5
         
         overlayView.layer.sublayers?.removeAll()
         overlayView.layer.addSublayer(maskLayer)
-    }
-    
-    private func createBlurOverlay(for faceRect: CGRect) {
-        overlayView.layer.sublayers?.removeAll()
         
+        // Create a hole in the blur effect view
         let path = UIBezierPath(rect: blurEffectView.bounds)
+        path.append(headPath.reversing())
         
-        // Create an oval path around the face rect with a margin to include some space around the face
-        let margin: CGFloat = 30.0
-        let extendedFaceRect = faceRect.insetBy(dx: -margin, dy: -margin)
-        let ovalPath = UIBezierPath(ovalIn: extendedFaceRect)
-        path.append(ovalPath.reversing())
-        
-        let maskLayer = CAShapeLayer()
-        maskLayer.path = path.cgPath
-        maskLayer.fillRule = .evenOdd
-        
-        blurEffectView.layer.mask = maskLayer
-    }
-    
-    private func addReferencePoints(for faceObservation: VNFaceObservation) {
-        guard let landmarks = faceObservation.landmarks else { return }
-        
-        // Helper function to add a dot for a given landmark point
-        func addDot(at point: CGPoint, color: UIColor) {
-            let size = previewLayer.bounds.size
-            let x = faceObservation.boundingBox.origin.x * size.width + point.x * faceObservation.boundingBox.width * size.width
-            let y = (1 - faceObservation.boundingBox.origin.y) * size.height - point.y * faceObservation.boundingBox.height * size.height
-            
-            let dotLayer = CALayer()
-            dotLayer.frame = CGRect(x: x - 3, y: y - 3, width: 6, height: 6)
-            dotLayer.backgroundColor = color.cgColor
-            dotLayer.cornerRadius = 3
-            
-            overlayView.layer.addSublayer(dotLayer)
-        }
-        
-        // Add dots for the left and right eyes' outer points (approximating the ears)
-        if let leftEye = landmarks.leftEye {
-            addDot(at: leftEye.normalizedPoints.first!, color: .red)
-        }
-        if let rightEye = landmarks.rightEye {
-            addDot(at: rightEye.normalizedPoints.last!, color: .red)
-        }
-        
-        // Add dot for the nose crest (bridge of the nose)
-        if let noseCrest = landmarks.noseCrest {
-            addDot(at: noseCrest.normalizedPoints[1], color: .blue)
-        }
+        let blurMaskLayer = CAShapeLayer()
+        blurMaskLayer.path = path.cgPath
+        blurEffectView.layer.mask = blurMaskLayer
     }
     
     private func startCountdown() {
         guard canTakePhoto else { return }
         canTakePhoto = false
+        
+        if photoCount == 0 {
+            blurEffectView.isHidden = true
+        }
         
         countdownLabel.isHidden = false
         countdownLabel.text = "3"
@@ -335,7 +354,7 @@ class ViewController: UIViewController {
         faceRect = nil // Reset the faceRect to allow new detection and blur creation
         blurEffectView.layer.mask = nil
         overlayView.layer.sublayers?.removeAll()
-        createOvalMask()
+        storedFacePath = nil
     }
 }
 
@@ -343,27 +362,61 @@ extension ViewController: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
         guard let data = photo.fileDataRepresentation(), let image = UIImage(data: data) else { return }
         
-        photoCount += 1
+        processImage(image)
+    }
+    
+    private func processImage(_ image: UIImage) {
+        guard let cgImage = image.cgImage else { return }
         
-        if photoCount == 1 {
-            // Save the first photo to the photo album
-            UIImageWriteToSavedPhotosAlbum(image, self, #selector(self.imageSaved(_:didFinishSavingWithError:contextInfo:)), nil)
+        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        let request = VNGeneratePersonSegmentationRequest()
+        request.qualityLevel = .accurate
+        request.outputPixelFormat = kCVPixelFormatType_OneComponent8
+        
+        do {
+            try handler.perform([request])
+            guard let mask = request.results?.first?.pixelBuffer else { return }
             
-            promptLabel.text = "Now make a face and take a second photo"
+            let maskImage = CIImage(cvPixelBuffer: mask)
+            let ciImage = CIImage(cgImage: cgImage)
             
-            // Reset the flag to allow another photo after a short delay
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                self.canTakePhoto = true
+            let maskScaleX = ciImage.extent.width / maskImage.extent.width
+            let maskScaleY = ciImage.extent.height / maskImage.extent.height
+            let scaledMaskImage = maskImage.transformed(by: .init(scaleX: maskScaleX, y: maskScaleY))
+            
+            let blendFilter = CIFilter.blendWithRedMask()
+            blendFilter.inputImage = ciImage
+            blendFilter.maskImage = scaledMaskImage
+            blendFilter.backgroundImage = CIImage(color: .white).cropped(to: ciImage.extent)
+            
+            guard let outputImage = blendFilter.outputImage else { return }
+            let context = CIContext()
+            if let cgOutputImage = context.createCGImage(outputImage, from: outputImage.extent) {
+                let finalImage = UIImage(cgImage: cgOutputImage)
+                
+                // Save the final image
+                UIImageWriteToSavedPhotosAlbum(finalImage, self, #selector(self.imageSaved(_:didFinishSavingWithError:contextInfo:)), nil)
+                
+                photoCount += 1
+                
+                if photoCount == 1 {
+                    promptLabel.text = "Now make a face and take a second photo"
+                    blurEffectView.isHidden = false
+                    
+                    // Reset the flag to allow another photo after a short delay
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        self.canTakePhoto = true
+                    }
+                } else {
+                    promptLabel.text = "Congratulations! You have completed the photo session."
+                    
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        self.resetToStart()
+                    }
+                }
             }
-        } else {
-            // Save the second photo to the photo album
-            UIImageWriteToSavedPhotosAlbum(image, self, #selector(self.imageSaved(_:didFinishSavingWithError:contextInfo:)), nil)
-            
-            promptLabel.text = "Congratulations! You have completed the photo session."
-            
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                self.resetToStart()
-            }
+        } catch {
+            print("Failed to process image: \(error)")
         }
     }
     
