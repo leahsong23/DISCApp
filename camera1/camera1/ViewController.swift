@@ -80,11 +80,11 @@ class ViewController: UIViewController {
     // Throttle photo capture
     private var canTakePhoto = false
     
-    // Face rect to maintain blur effect
-    private var faceRect: CGRect?
+    // Stored person mask from the first image
+    private var storedPersonMask: CIImage?
     
-    // Stored face path from the first image
-    private var storedFacePath: UIBezierPath?
+    // Person segmentation request
+    private var segmentationRequest = VNGeneratePersonSegmentationRequest()
     
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -96,6 +96,7 @@ class ViewController: UIViewController {
         setupStartButton()
         checkCameraPermissions()
         setupFaceDetection()
+        setupPersonSegmentation()
     }
     
     override func viewDidLayoutSubviews() {
@@ -186,6 +187,11 @@ class ViewController: UIViewController {
         })
     }
     
+    private func setupPersonSegmentation() {
+        segmentationRequest.qualityLevel = .balanced
+        segmentationRequest.outputPixelFormat = kCVPixelFormatType_OneComponent8
+    }
+    
     private func handleFaceDetectionResults(_ results: [VNFaceObservation]) {
         guard let result = results.first else {
             // No face detected
@@ -201,30 +207,29 @@ class ViewController: UIViewController {
                                    size: CGSize(width: faceRect.size.width * size.width,
                                                 height: faceRect.size.height * size.height))
         
-        // Update faceRect and create the blur overlay
-        self.faceRect = convertedRect
-        
-        if photoCount == 1 {
-            createFaceMask(for: result)
+        if photoCount == 1, let storedPersonMask = self.storedPersonMask {
+            // Display the stored mask during the countdown for the second photo
+            createPersonMask(for: result, mask: storedPersonMask)
         } else {
             overlayView.layer.sublayers?.removeAll()
         }
         
-        // Check if the face is within the mask
-        if photoCount == 1, let storedFacePath = self.storedFacePath, storedFacePath.contains(CGPoint(x: convertedRect.midX, y: convertedRect.midY)) {
-            startCountdown()
+        if photoCount == 1, let storedPersonMask = self.storedPersonMask {
+            let maskRect = storedPersonMask.extent
+            if maskRect.contains(convertedRect) {
+                startCountdown()
+            }
         } else if photoCount == 0 {
             startCountdown()
         }
     }
     
-    private func createFaceMask(for faceObservation: VNFaceObservation) {
+    private func createPersonMask(for faceObservation: VNFaceObservation, mask: CIImage? = nil) {
         guard let landmarks = faceObservation.landmarks else { return }
         
         let facePath = UIBezierPath()
         let size = previewLayer.bounds.size
         
-        // Helper function to convert normalized points to view points
         func convertPoints(_ points: [CGPoint], boundingBox: CGRect) -> [CGPoint] {
             return points.map { point in
                 let x = boundingBox.origin.x * size.width + point.x * boundingBox.size.width * size.width
@@ -233,7 +238,6 @@ class ViewController: UIViewController {
             }
         }
         
-        // Add paths for the face contour
         if let faceContour = landmarks.faceContour {
             let points = convertPoints(faceContour.normalizedPoints, boundingBox: faceObservation.boundingBox)
             for (i, point) in points.enumerated() {
@@ -246,8 +250,6 @@ class ViewController: UIViewController {
             facePath.close()
         }
         
-        storedFacePath = facePath
-        
         let maskLayer = CAShapeLayer()
         maskLayer.path = facePath.cgPath
         maskLayer.fillColor = UIColor.clear.cgColor
@@ -257,59 +259,19 @@ class ViewController: UIViewController {
         overlayView.layer.sublayers?.removeAll()
         overlayView.layer.addSublayer(maskLayer)
         
-        // Create a hole in the blur effect view
         let path = UIBezierPath(rect: blurEffectView.bounds)
         path.append(facePath.reversing())
         
         let blurMaskLayer = CAShapeLayer()
         blurMaskLayer.path = path.cgPath
         blurEffectView.layer.mask = blurMaskLayer
-    }
-    
-    private func createHeadMask(for faceObservation: VNFaceObservation) {
-        guard let landmarks = faceObservation.landmarks else { return }
         
-        let headPath = UIBezierPath()
-        let size = previewLayer.bounds.size
-        
-        // Helper function to convert normalized points to view points
-        func convertPoints(_ points: [CGPoint], boundingBox: CGRect) -> [CGPoint] {
-            return points.map { point in
-                let x = boundingBox.origin.x * size.width + point.x * boundingBox.size.width * size.width
-                let y = (1 - boundingBox.origin.y) * size.height - point.y * boundingBox.size.height * size.height
-                return CGPoint(x: x, y: y)
-            }
+        if let mask = mask {
+            let maskLayer = CALayer()
+            maskLayer.contents = mask
+            maskLayer.frame = previewLayer.bounds
+            overlayView.layer.addSublayer(maskLayer)
         }
-        
-        // Add paths for the outer head
-        if let faceContour = landmarks.faceContour {
-            let points = convertPoints(faceContour.normalizedPoints, boundingBox: faceObservation.boundingBox)
-            for (i, point) in points.enumerated() {
-                if i == 0 {
-                    headPath.move(to: point)
-                } else {
-                    headPath.addLine(to: point)
-                }
-            }
-            headPath.close()
-        }
-        
-        let maskLayer = CAShapeLayer()
-        maskLayer.path = headPath.cgPath
-        maskLayer.fillColor = UIColor.clear.cgColor
-        maskLayer.strokeColor = UIColor.white.cgColor
-        maskLayer.lineWidth = 5
-        
-        overlayView.layer.sublayers?.removeAll()
-        overlayView.layer.addSublayer(maskLayer)
-        
-        // Create a hole in the blur effect view
-        let path = UIBezierPath(rect: blurEffectView.bounds)
-        path.append(headPath.reversing())
-        
-        let blurMaskLayer = CAShapeLayer()
-        blurMaskLayer.path = path.cgPath
-        blurEffectView.layer.mask = blurMaskLayer
     }
     
     private func startCountdown() {
@@ -351,10 +313,9 @@ class ViewController: UIViewController {
         canTakePhoto = false
         startButton.isHidden = false
         promptLabel.isHidden = true
-        faceRect = nil // Reset the faceRect to allow new detection and blur creation
         blurEffectView.layer.mask = nil
         overlayView.layer.sublayers?.removeAll()
-        storedFacePath = nil
+        storedPersonMask = nil
     }
 }
 
@@ -369,13 +330,10 @@ extension ViewController: AVCapturePhotoCaptureDelegate {
         guard let cgImage = image.cgImage else { return }
         
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        let request = VNGeneratePersonSegmentationRequest()
-        request.qualityLevel = .accurate
-        request.outputPixelFormat = kCVPixelFormatType_OneComponent8
         
         do {
-            try handler.perform([request])
-            guard let mask = request.results?.first?.pixelBuffer else { return }
+            try handler.perform([segmentationRequest])
+            guard let mask = segmentationRequest.results?.first?.pixelBuffer else { return }
             
             let maskImage = CIImage(cvPixelBuffer: mask)
             let ciImage = CIImage(cgImage: cgImage)
@@ -384,9 +342,14 @@ extension ViewController: AVCapturePhotoCaptureDelegate {
             let maskScaleY = ciImage.extent.height / maskImage.extent.height
             let scaledMaskImage = maskImage.transformed(by: .init(scaleX: maskScaleX, y: maskScaleY))
             
-            let blendFilter = CIFilter.blendWithRedMask()
+            if photoCount == 0 {
+                // Store the mask of the first image
+                storedPersonMask = scaledMaskImage
+            }
+            
+            let blendFilter = CIFilter.blendWithMask()
             blendFilter.inputImage = ciImage
-            blendFilter.maskImage = scaledMaskImage
+            blendFilter.maskImage = photoCount == 0 ? scaledMaskImage : storedPersonMask
             blendFilter.backgroundImage = CIImage(color: .white).cropped(to: ciImage.extent)
             
             guard let outputImage = blendFilter.outputImage else { return }
