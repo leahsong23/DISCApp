@@ -34,13 +34,6 @@ class ViewController: UIViewController {
         return view
     }()
     
-    // Blur effect view
-    private let blurEffectView: UIVisualEffectView = {
-        let blurEffect = UIBlurEffect(style: .dark)
-        let blurEffectView = UIVisualEffectView(effect: blurEffect)
-        return blurEffectView
-    }()
-    
     // Overlay view
     private let overlayView: UIView = {
         let view = UIView()
@@ -83,6 +76,9 @@ class ViewController: UIViewController {
     // Stored person mask from the first image
     private var storedPersonMask: CIImage?
     
+    // Stored image from the first photo
+    private var storedImage: CIImage?
+    
     // Person segmentation request
     private var segmentationRequest = VNGeneratePersonSegmentationRequest()
     
@@ -104,7 +100,6 @@ class ViewController: UIViewController {
         previewLayer.frame = view.bounds
         
         overlayContainerView.frame = view.bounds
-        blurEffectView.frame = view.bounds
         overlayView.frame = view.bounds
         
         let promptLabelY = view.frame.size.height - 150
@@ -160,7 +155,6 @@ class ViewController: UIViewController {
     
     private func setupOverlay() {
         view.addSubview(overlayContainerView)
-        overlayContainerView.addSubview(blurEffectView)
         overlayContainerView.addSubview(overlayView)
     }
     
@@ -199,23 +193,22 @@ class ViewController: UIViewController {
             return
         }
         
-        let faceRect = result.boundingBox
-        let size = previewLayer.bounds.size
-        let origin = CGPoint(x: faceRect.origin.x * size.width,
-                             y: (1 - faceRect.origin.y - faceRect.size.height) * size.height)
-        let convertedRect = CGRect(origin: origin,
-                                   size: CGSize(width: faceRect.size.width * size.width,
-                                                height: faceRect.size.height * size.height))
-        
         if photoCount == 1, let storedPersonMask = self.storedPersonMask {
-            // Display the stored mask during the countdown for the second photo
-            createPersonMask(for: result, mask: storedPersonMask)
+            displayStoredMaskDuringCountdown(mask: storedPersonMask)
         } else {
             overlayView.layer.sublayers?.removeAll()
         }
         
         if photoCount == 1, let storedPersonMask = self.storedPersonMask {
             let maskRect = storedPersonMask.extent
+            let faceRect = result.boundingBox
+            let size = previewLayer.bounds.size
+            let origin = CGPoint(x: faceRect.origin.x * size.width,
+                                 y: (1 - faceRect.origin.y - faceRect.size.height) * size.height)
+            let convertedRect = CGRect(origin: origin,
+                                       size: CGSize(width: faceRect.size.width * size.width,
+                                                    height: faceRect.size.height * size.height))
+            
             if maskRect.contains(convertedRect) {
                 startCountdown()
             }
@@ -224,52 +217,22 @@ class ViewController: UIViewController {
         }
     }
     
-    private func createPersonMask(for faceObservation: VNFaceObservation, mask: CIImage? = nil) {
-        guard let landmarks = faceObservation.landmarks else { return }
-        
-        let facePath = UIBezierPath()
-        let size = previewLayer.bounds.size
-        
-        func convertPoints(_ points: [CGPoint], boundingBox: CGRect) -> [CGPoint] {
-            return points.map { point in
-                let x = boundingBox.origin.x * size.width + point.x * boundingBox.size.width * size.width
-                let y = (1 - boundingBox.origin.y) * size.height - point.y * boundingBox.size.height * size.height
-                return CGPoint(x: x, y: y)
-            }
-        }
-        
-        if let faceContour = landmarks.faceContour {
-            let points = convertPoints(faceContour.normalizedPoints, boundingBox: faceObservation.boundingBox)
-            for (i, point) in points.enumerated() {
-                if i == 0 {
-                    facePath.move(to: point)
-                } else {
-                    facePath.addLine(to: point)
-                }
-            }
-            facePath.close()
-        }
-        
-        let maskLayer = CAShapeLayer()
-        maskLayer.path = facePath.cgPath
-        maskLayer.fillColor = UIColor.clear.cgColor
-        maskLayer.strokeColor = UIColor.white.cgColor
-        maskLayer.lineWidth = 5
-        
+    private func displayStoredMaskDuringCountdown(mask: CIImage) {
         overlayView.layer.sublayers?.removeAll()
-        overlayView.layer.addSublayer(maskLayer)
         
-        let path = UIBezierPath(rect: blurEffectView.bounds)
-        path.append(facePath.reversing())
+        let invertedMask = mask.applyingFilter("CIColorInvert")
+        let blackMask = invertedMask.applyingFilter("CIMaskToAlpha")
         
-        let blurMaskLayer = CAShapeLayer()
-        blurMaskLayer.path = path.cgPath
-        blurEffectView.layer.mask = blurMaskLayer
-        
-        if let mask = mask {
+        let rotatedMask = blackMask.transformed(by: CGAffineTransform(rotationAngle: .pi / 2 * 3)).transformed(by: CGAffineTransform(scaleX: -1, y: 1))
+    
+        let context = CIContext()
+        if let cgOutputImage = context.createCGImage(rotatedMask, from: rotatedMask.extent) {
+            let finalImage = UIImage(cgImage: cgOutputImage)
+            
             let maskLayer = CALayer()
-            maskLayer.contents = mask
-            maskLayer.frame = previewLayer.bounds
+            maskLayer.contents = finalImage.cgImage
+            maskLayer.frame = overlayView.bounds
+            maskLayer.contentsGravity = .resizeAspectFill
             overlayView.layer.addSublayer(maskLayer)
         }
     }
@@ -278,8 +241,8 @@ class ViewController: UIViewController {
         guard canTakePhoto else { return }
         canTakePhoto = false
         
-        if photoCount == 0 {
-            blurEffectView.isHidden = true
+        if photoCount == 1, let storedPersonMask = self.storedPersonMask {
+            displayStoredMaskDuringCountdown(mask: storedPersonMask)
         }
         
         countdownLabel.isHidden = false
@@ -313,9 +276,9 @@ class ViewController: UIViewController {
         canTakePhoto = false
         startButton.isHidden = false
         promptLabel.isHidden = true
-        blurEffectView.layer.mask = nil
         overlayView.layer.sublayers?.removeAll()
         storedPersonMask = nil
+        storedImage = nil
     }
 }
 
@@ -343,8 +306,9 @@ extension ViewController: AVCapturePhotoCaptureDelegate {
             let scaledMaskImage = maskImage.transformed(by: .init(scaleX: maskScaleX, y: maskScaleY))
             
             if photoCount == 0 {
-                // Store the mask of the first image
+                // Store the mask and image of the first photo
                 storedPersonMask = scaledMaskImage
+                storedImage = ciImage
             }
             
             let blendFilter = CIFilter.blendWithMask()
@@ -364,7 +328,11 @@ extension ViewController: AVCapturePhotoCaptureDelegate {
                 
                 if photoCount == 1 {
                     promptLabel.text = "Now make a face and take a second photo"
-                    blurEffectView.isHidden = false
+                    
+                    // Display the stored mask during the countdown
+                    if let mask = storedPersonMask {
+                        displayStoredMaskDuringCountdown(mask: mask)
+                    }
                     
                     // Reset the flag to allow another photo after a short delay
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
