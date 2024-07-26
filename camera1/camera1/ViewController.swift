@@ -223,10 +223,24 @@ class ViewController: UIViewController {
         let invertedMask = mask.applyingFilter("CIColorInvert")
         let blackMask = invertedMask.applyingFilter("CIMaskToAlpha")
         
-        let rotatedMask = blackMask.transformed(by: CGAffineTransform(rotationAngle: .pi / 2 * 3)).transformed(by: CGAffineTransform(scaleX: -1, y: 1))
-    
+        // Rotate 90 degrees counterclockwise and mirror the image
+        let rotatedMask = blackMask
+            .transformed(by: CGAffineTransform(rotationAngle: .pi / 2 * 3))
+            .transformed(by: CGAffineTransform(scaleX: -1, y: 1))
+        
+        // Create a black background image
+        let blackBackground = CIImage(color: .black).cropped(to: rotatedMask.extent)
+        
+        // Blend the mask with the black background
+        let blendFilter = CIFilter.blendWithMask()
+        blendFilter.inputImage = blackBackground
+        blendFilter.maskImage = rotatedMask
+        blendFilter.backgroundImage = CIImage(color: .clear).cropped(to: rotatedMask.extent)
+        
+        guard let outputImage = blendFilter.outputImage else { return }
+        
         let context = CIContext()
-        if let cgOutputImage = context.createCGImage(rotatedMask, from: rotatedMask.extent) {
+        if let cgOutputImage = context.createCGImage(outputImage, from: outputImage.extent) {
             let finalImage = UIImage(cgImage: cgOutputImage)
             
             let maskLayer = CALayer()
@@ -236,6 +250,7 @@ class ViewController: UIViewController {
             overlayView.layer.addSublayer(maskLayer)
         }
     }
+
     
     private func startCountdown() {
         guard canTakePhoto else { return }
