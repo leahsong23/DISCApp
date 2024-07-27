@@ -27,6 +27,17 @@ class ViewController: UIViewController {
         return button
     }()
     
+    // Restart button
+    private let restartButton: UIButton = {
+        let button = UIButton(frame: CGRect(x: 0, y: 0, width: 200, height: 50))
+        button.setTitle("Restart", for: .normal)
+        button.backgroundColor = .systemRed
+        button.layer.cornerRadius = 25
+        button.setTitleColor(.white, for: .normal)
+        button.isHidden = true
+        return button
+    }()
+    
     // Overlay container view
     private let overlayContainerView: UIView = {
         let view = UIView()
@@ -90,6 +101,7 @@ class ViewController: UIViewController {
         setupPromptLabel()
         setupCountdownLabel()
         setupStartButton()
+        setupRestartButton()
         checkCameraPermissions()
         setupFaceDetection()
         setupPersonSegmentation()
@@ -108,6 +120,7 @@ class ViewController: UIViewController {
         countdownLabel.frame = CGRect(x: 0, y: 0, width: 200, height: 100)
         countdownLabel.center = overlayView.center
         startButton.center = CGPoint(x: view.frame.size.width / 2, y: promptLabelY + 100)
+        restartButton.center = CGPoint(x: view.frame.size.width / 2, y: promptLabelY + 100)
     }
     
     private func checkCameraPermissions() {
@@ -169,6 +182,11 @@ class ViewController: UIViewController {
     private func setupStartButton() {
         view.addSubview(startButton)
         startButton.addTarget(self, action: #selector(didTapStartButton), for: .touchUpInside)
+    }
+    
+    private func setupRestartButton() {
+        view.addSubview(restartButton)
+        restartButton.addTarget(self, action: #selector(didTapRestartButton), for: .touchUpInside)
     }
     
     private func setupFaceDetection() {
@@ -250,7 +268,6 @@ class ViewController: UIViewController {
             overlayView.layer.addSublayer(maskLayer)
         }
     }
-
     
     private func startCountdown() {
         guard canTakePhoto else { return }
@@ -282,6 +299,10 @@ class ViewController: UIViewController {
         canTakePhoto = true
     }
     
+    @objc private func didTapRestartButton() {
+        resetToStart()
+    }
+    
     @objc private func didTapTakePhoto() {
         output.capturePhoto(with: AVCapturePhotoSettings(), delegate: self)
     }
@@ -294,6 +315,66 @@ class ViewController: UIViewController {
         overlayView.layer.sublayers?.removeAll()
         storedPersonMask = nil
         storedImage = nil
+        restartButton.isHidden = true
+        previewLayer.isHidden = false
+        session?.startRunning()
+    }
+    
+    private func convertToGrayscale(image: UIImage) -> UIImage? {
+        let context = CIContext()
+        guard let cgImage = image.cgImage else { return nil }
+        
+        let ciImage = CIImage(cgImage: cgImage)
+        let grayscale = ciImage.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0.0])
+        
+        if let cgGrayscaleImage = context.createCGImage(grayscale, from: grayscale.extent) {
+            return UIImage(cgImage: cgGrayscaleImage)
+        }
+        return nil
+    }
+    
+    private func getGrayscalePixelValues(image: UIImage) -> [[UInt8]]? {
+        guard let cgImage = image.cgImage else { return nil }
+        
+        let width = cgImage.width
+        let height = cgImage.height
+        let colorSpace = CGColorSpaceCreateDeviceGray()
+        let rawData = UnsafeMutablePointer<UInt8>.allocate(capacity: width * height)
+        let bytesPerPixel = 1
+        let bytesPerRow = bytesPerPixel * width
+        let bitsPerComponent = 8
+        
+        guard let context = CGContext(data: rawData,
+                                      width: width,
+                                      height: height,
+                                      bitsPerComponent: bitsPerComponent,
+                                      bytesPerRow: bytesPerRow,
+                                      space: colorSpace,
+                                      bitmapInfo: CGImageAlphaInfo.none.rawValue) else {
+            rawData.deallocate()
+            return nil
+        }
+        
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        
+        var pixelValues = [[UInt8]](repeating: [UInt8](repeating: 0, count: width), count: height)
+        for y in 0..<height {
+            for x in 0..<width {
+                let index = y * width + x
+                pixelValues[y][x] = rawData[index]
+            }
+        }
+        
+        rawData.deallocate()
+        return pixelValues
+    }
+    
+    private func printGrayscalePixelValues(for image: UIImage) {
+        if let pixelValues = getGrayscalePixelValues(image: image) {
+            for row in pixelValues {
+                print(row)
+            }
+        }
     }
 }
 
@@ -306,64 +387,79 @@ extension ViewController: AVCapturePhotoCaptureDelegate {
     
     private func processImage(_ image: UIImage) {
         guard let cgImage = image.cgImage else { return }
-        
+
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        
+
         do {
             try handler.perform([segmentationRequest])
             guard let mask = segmentationRequest.results?.first?.pixelBuffer else { return }
-            
+
             let maskImage = CIImage(cvPixelBuffer: mask)
             let ciImage = CIImage(cgImage: cgImage)
-            
+
             let maskScaleX = ciImage.extent.width / maskImage.extent.width
             let maskScaleY = ciImage.extent.height / maskImage.extent.height
             let scaledMaskImage = maskImage.transformed(by: .init(scaleX: maskScaleX, y: maskScaleY))
-            
+
             if photoCount == 0 {
                 // Store the mask and image of the first photo
                 storedPersonMask = scaledMaskImage
                 storedImage = ciImage
             }
-            
+
             let blendFilter = CIFilter.blendWithMask()
             blendFilter.inputImage = ciImage
             blendFilter.maskImage = photoCount == 0 ? scaledMaskImage : storedPersonMask
             blendFilter.backgroundImage = CIImage(color: .white).cropped(to: ciImage.extent)
-            
+
             guard let outputImage = blendFilter.outputImage else { return }
             let context = CIContext()
             if let cgOutputImage = context.createCGImage(outputImage, from: outputImage.extent) {
                 let finalImage = UIImage(cgImage: cgOutputImage)
-                
+
                 // Save the final image
                 UIImageWriteToSavedPhotosAlbum(finalImage, self, #selector(self.imageSaved(_:didFinishSavingWithError:contextInfo:)), nil)
                 
+                // Convert to grayscale and save
+                if let grayscaleImage = convertToGrayscale(image: finalImage) {
+                    UIImageWriteToSavedPhotosAlbum(grayscaleImage, self, #selector(self.imageSaved(_:didFinishSavingWithError:contextInfo:)), nil)
+                    
+                    // Print the dimensions of the grayscale image
+                    print("Grayscale image dimensions for photo \(photoCount + 1): \(grayscaleImage.size.width) x \(grayscaleImage.size.height)")
+
+                    // Print grayscale pixel values to the console
+                    print("Grayscale pixel values for photo \(photoCount + 1):")
+                    printGrayscalePixelValues(for: grayscaleImage)
+                }
+
                 photoCount += 1
-                
+
                 if photoCount == 1 {
                     promptLabel.text = "Now make a face and take a second photo"
-                    
+
                     // Display the stored mask during the countdown
                     if let mask = storedPersonMask {
                         displayStoredMaskDuringCountdown(mask: mask)
                     }
-                    
+
                     // Reset the flag to allow another photo after a short delay
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                         self.canTakePhoto = true
                     }
                 } else {
                     promptLabel.text = "Congratulations! You have completed the photo session."
-                    
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                        self.resetToStart()
-                    }
+                    restartButton.isHidden = false
+                    freezeScreen()
                 }
             }
         } catch {
             print("Failed to process image: \(error)")
         }
+    }
+    
+    private func freezeScreen() {
+        session?.stopRunning()
+        // Leave the preview layer visible to maintain the screen's appearance
     }
     
     @objc private func imageSaved(_ image: UIImage, didFinishSavingWithError error: Error?, contextInfo: UnsafeRawPointer) {
