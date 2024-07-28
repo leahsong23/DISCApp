@@ -369,11 +369,41 @@ class ViewController: UIViewController {
         return pixelValues
     }
     
+    private func downscale(pixelValues: [[UInt8]], factor: Int) -> [[UInt8]] {
+        let height = pixelValues.count
+        let width = pixelValues[0].count
+        let downscaledHeight = height / factor
+        let downscaledWidth = width / factor
+        
+        var downscaledValues = [[UInt8]](repeating: [UInt8](repeating: 0, count: downscaledWidth), count: downscaledHeight)
+        
+        for y in 0..<downscaledHeight {
+            for x in 0..<downscaledWidth {
+                var sum: Int = 0
+                for dy in 0..<factor {
+                    for dx in 0..<factor {
+                        sum += Int(pixelValues[y * factor + dy][x * factor + dx])
+                    }
+                }
+                downscaledValues[y][x] = UInt8(sum / (factor * factor))
+            }
+        }
+        
+        return downscaledValues
+    }
+    
     private func printGrayscalePixelValues(for image: UIImage) {
         if let pixelValues = getGrayscalePixelValues(image: image) {
             for row in pixelValues {
                 print(row)
             }
+            
+            let downscaledValues = downscale(pixelValues: pixelValues, factor: 10)
+            print("Downscaled grayscale pixel values:")
+            for row in downscaledValues {
+                print(row)
+            }
+            print("Downscaled dimensions: \(downscaledValues[0].count) x \(downscaledValues.count)")
         }
     }
 }
