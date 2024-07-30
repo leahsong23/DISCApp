@@ -27,18 +27,22 @@ class ViewController: UIViewController {
         return button
     }()
     
+    // Restart button
+    private let restartButton: UIButton = {
+        let button = UIButton(frame: CGRect(x: 0, y: 0, width: 200, height: 50))
+        button.setTitle("Restart", for: .normal)
+        button.backgroundColor = .systemRed
+        button.layer.cornerRadius = 25
+        button.setTitleColor(.white, for: .normal)
+        button.isHidden = true
+        return button
+    }()
+    
     // Overlay container view
     private let overlayContainerView: UIView = {
         let view = UIView()
         view.backgroundColor = .clear
         return view
-    }()
-    
-    // Blur effect view
-    private let blurEffectView: UIVisualEffectView = {
-        let blurEffect = UIBlurEffect(style: .dark)
-        let blurEffectView = UIVisualEffectView(effect: blurEffect)
-        return blurEffectView
     }()
     
     // Overlay view
@@ -80,11 +84,14 @@ class ViewController: UIViewController {
     // Throttle photo capture
     private var canTakePhoto = false
     
-    // Face rect to maintain blur effect
-    private var faceRect: CGRect?
+    // Stored person mask from the first image
+    private var storedPersonMask: CIImage?
     
-    // Stored face path from the first image
-    private var storedFacePath: UIBezierPath?
+    // Stored image from the first photo
+    private var storedImage: CIImage?
+    
+    // Person segmentation request
+    private var segmentationRequest = VNGeneratePersonSegmentationRequest()
     
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -94,8 +101,10 @@ class ViewController: UIViewController {
         setupPromptLabel()
         setupCountdownLabel()
         setupStartButton()
+        setupRestartButton()
         checkCameraPermissions()
         setupFaceDetection()
+        setupPersonSegmentation()
     }
     
     override func viewDidLayoutSubviews() {
@@ -103,7 +112,6 @@ class ViewController: UIViewController {
         previewLayer.frame = view.bounds
         
         overlayContainerView.frame = view.bounds
-        blurEffectView.frame = view.bounds
         overlayView.frame = view.bounds
         
         let promptLabelY = view.frame.size.height - 150
@@ -112,6 +120,7 @@ class ViewController: UIViewController {
         countdownLabel.frame = CGRect(x: 0, y: 0, width: 200, height: 100)
         countdownLabel.center = overlayView.center
         startButton.center = CGPoint(x: view.frame.size.width / 2, y: promptLabelY + 100)
+        restartButton.center = CGPoint(x: view.frame.size.width / 2, y: promptLabelY + 100)
     }
     
     private func checkCameraPermissions() {
@@ -159,7 +168,6 @@ class ViewController: UIViewController {
     
     private func setupOverlay() {
         view.addSubview(overlayContainerView)
-        overlayContainerView.addSubview(blurEffectView)
         overlayContainerView.addSubview(overlayView)
     }
     
@@ -176,6 +184,11 @@ class ViewController: UIViewController {
         startButton.addTarget(self, action: #selector(didTapStartButton), for: .touchUpInside)
     }
     
+    private func setupRestartButton() {
+        view.addSubview(restartButton)
+        restartButton.addTarget(self, action: #selector(didTapRestartButton), for: .touchUpInside)
+    }
+    
     private func setupFaceDetection() {
         faceDetectionRequest = VNDetectFaceLandmarksRequest(completionHandler: { [weak self] request, error in
             guard let results = request.results as? [VNFaceObservation], let self = self else { return }
@@ -186,6 +199,11 @@ class ViewController: UIViewController {
         })
     }
     
+    private func setupPersonSegmentation() {
+        segmentationRequest.qualityLevel = .balanced
+        segmentationRequest.outputPixelFormat = kCVPixelFormatType_OneComponent8
+    }
+    
     private func handleFaceDetectionResults(_ results: [VNFaceObservation]) {
         guard let result = results.first else {
             // No face detected
@@ -193,131 +211,70 @@ class ViewController: UIViewController {
             return
         }
         
-        let faceRect = result.boundingBox
-        let size = previewLayer.bounds.size
-        let origin = CGPoint(x: faceRect.origin.x * size.width,
-                             y: (1 - faceRect.origin.y - faceRect.size.height) * size.height)
-        let convertedRect = CGRect(origin: origin,
-                                   size: CGSize(width: faceRect.size.width * size.width,
-                                                height: faceRect.size.height * size.height))
-        
-        // Update faceRect and create the blur overlay
-        self.faceRect = convertedRect
-        
-        if photoCount == 1 {
-            createFaceMask(for: result)
+        if photoCount == 1, let storedPersonMask = self.storedPersonMask {
+            displayStoredMaskDuringCountdown(mask: storedPersonMask)
         } else {
             overlayView.layer.sublayers?.removeAll()
         }
         
-        // Check if the face is within the mask
-        if photoCount == 1, let storedFacePath = self.storedFacePath, storedFacePath.contains(CGPoint(x: convertedRect.midX, y: convertedRect.midY)) {
-            startCountdown()
+        if photoCount == 1, let storedPersonMask = self.storedPersonMask {
+            let maskRect = storedPersonMask.extent
+            let faceRect = result.boundingBox
+            let size = previewLayer.bounds.size
+            let origin = CGPoint(x: faceRect.origin.x * size.width,
+                                 y: (1 - faceRect.origin.y - faceRect.size.height) * size.height)
+            let convertedRect = CGRect(origin: origin,
+                                       size: CGSize(width: faceRect.size.width * size.width,
+                                                    height: faceRect.size.height * size.height))
+            
+            if maskRect.contains(convertedRect) {
+                startCountdown()
+            }
         } else if photoCount == 0 {
             startCountdown()
         }
     }
     
-    private func createFaceMask(for faceObservation: VNFaceObservation) {
-        guard let landmarks = faceObservation.landmarks else { return }
-        
-        let facePath = UIBezierPath()
-        let size = previewLayer.bounds.size
-        
-        // Helper function to convert normalized points to view points
-        func convertPoints(_ points: [CGPoint], boundingBox: CGRect) -> [CGPoint] {
-            return points.map { point in
-                let x = boundingBox.origin.x * size.width + point.x * boundingBox.size.width * size.width
-                let y = (1 - boundingBox.origin.y) * size.height - point.y * boundingBox.size.height * size.height
-                return CGPoint(x: x, y: y)
-            }
-        }
-        
-        // Add paths for the face contour
-        if let faceContour = landmarks.faceContour {
-            let points = convertPoints(faceContour.normalizedPoints, boundingBox: faceObservation.boundingBox)
-            for (i, point) in points.enumerated() {
-                if i == 0 {
-                    facePath.move(to: point)
-                } else {
-                    facePath.addLine(to: point)
-                }
-            }
-            facePath.close()
-        }
-        
-        storedFacePath = facePath
-        
-        let maskLayer = CAShapeLayer()
-        maskLayer.path = facePath.cgPath
-        maskLayer.fillColor = UIColor.clear.cgColor
-        maskLayer.strokeColor = UIColor.white.cgColor
-        maskLayer.lineWidth = 5
-        
+    private func displayStoredMaskDuringCountdown(mask: CIImage) {
         overlayView.layer.sublayers?.removeAll()
-        overlayView.layer.addSublayer(maskLayer)
         
-        // Create a hole in the blur effect view
-        let path = UIBezierPath(rect: blurEffectView.bounds)
-        path.append(facePath.reversing())
+        let invertedMask = mask.applyingFilter("CIColorInvert")
+        let blackMask = invertedMask.applyingFilter("CIMaskToAlpha")
         
-        let blurMaskLayer = CAShapeLayer()
-        blurMaskLayer.path = path.cgPath
-        blurEffectView.layer.mask = blurMaskLayer
-    }
-    
-    private func createHeadMask(for faceObservation: VNFaceObservation) {
-        guard let landmarks = faceObservation.landmarks else { return }
+        // Rotate 90 degrees counterclockwise and mirror the image
+        let rotatedMask = blackMask
+            .transformed(by: CGAffineTransform(rotationAngle: .pi / 2 * 3))
+            .transformed(by: CGAffineTransform(scaleX: -1, y: 1))
         
-        let headPath = UIBezierPath()
-        let size = previewLayer.bounds.size
+        // Create a black background image
+        let blackBackground = CIImage(color: .black).cropped(to: rotatedMask.extent)
         
-        // Helper function to convert normalized points to view points
-        func convertPoints(_ points: [CGPoint], boundingBox: CGRect) -> [CGPoint] {
-            return points.map { point in
-                let x = boundingBox.origin.x * size.width + point.x * boundingBox.size.width * size.width
-                let y = (1 - boundingBox.origin.y) * size.height - point.y * boundingBox.size.height * size.height
-                return CGPoint(x: x, y: y)
-            }
+        // Blend the mask with the black background
+        let blendFilter = CIFilter.blendWithMask()
+        blendFilter.inputImage = blackBackground
+        blendFilter.maskImage = rotatedMask
+        blendFilter.backgroundImage = CIImage(color: .clear).cropped(to: rotatedMask.extent)
+        
+        guard let outputImage = blendFilter.outputImage else { return }
+        
+        let context = CIContext()
+        if let cgOutputImage = context.createCGImage(outputImage, from: outputImage.extent) {
+            let finalImage = UIImage(cgImage: cgOutputImage)
+            
+            let maskLayer = CALayer()
+            maskLayer.contents = finalImage.cgImage
+            maskLayer.frame = overlayView.bounds
+            maskLayer.contentsGravity = .resizeAspectFill
+            overlayView.layer.addSublayer(maskLayer)
         }
-        
-        // Add paths for the outer head
-        if let faceContour = landmarks.faceContour {
-            let points = convertPoints(faceContour.normalizedPoints, boundingBox: faceObservation.boundingBox)
-            for (i, point) in points.enumerated() {
-                if i == 0 {
-                    headPath.move(to: point)
-                } else {
-                    headPath.addLine(to: point)
-                }
-            }
-            headPath.close()
-        }
-        
-        let maskLayer = CAShapeLayer()
-        maskLayer.path = headPath.cgPath
-        maskLayer.fillColor = UIColor.clear.cgColor
-        maskLayer.strokeColor = UIColor.white.cgColor
-        maskLayer.lineWidth = 5
-        
-        overlayView.layer.sublayers?.removeAll()
-        overlayView.layer.addSublayer(maskLayer)
-        
-        // Create a hole in the blur effect view
-        let path = UIBezierPath(rect: blurEffectView.bounds)
-        path.append(headPath.reversing())
-        
-        let blurMaskLayer = CAShapeLayer()
-        blurMaskLayer.path = path.cgPath
-        blurEffectView.layer.mask = blurMaskLayer
     }
     
     private func startCountdown() {
         guard canTakePhoto else { return }
         canTakePhoto = false
         
-        if photoCount == 0 {
-            blurEffectView.isHidden = true
+        if photoCount == 1, let storedPersonMask = self.storedPersonMask {
+            displayStoredMaskDuringCountdown(mask: storedPersonMask)
         }
         
         countdownLabel.isHidden = false
@@ -342,6 +299,10 @@ class ViewController: UIViewController {
         canTakePhoto = true
     }
     
+    @objc private func didTapRestartButton() {
+        resetToStart()
+    }
+    
     @objc private func didTapTakePhoto() {
         output.capturePhoto(with: AVCapturePhotoSettings(), delegate: self)
     }
@@ -351,10 +312,99 @@ class ViewController: UIViewController {
         canTakePhoto = false
         startButton.isHidden = false
         promptLabel.isHidden = true
-        faceRect = nil // Reset the faceRect to allow new detection and blur creation
-        blurEffectView.layer.mask = nil
         overlayView.layer.sublayers?.removeAll()
-        storedFacePath = nil
+        storedPersonMask = nil
+        storedImage = nil
+        restartButton.isHidden = true
+        previewLayer.isHidden = false
+        session?.startRunning()
+    }
+    
+    private func convertToGrayscale(image: UIImage) -> UIImage? {
+        let context = CIContext()
+        guard let cgImage = image.cgImage else { return nil }
+        
+        let ciImage = CIImage(cgImage: cgImage)
+        let grayscale = ciImage.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0.0])
+        
+        if let cgGrayscaleImage = context.createCGImage(grayscale, from: grayscale.extent) {
+            return UIImage(cgImage: cgGrayscaleImage)
+        }
+        return nil
+    }
+    
+    private func getGrayscalePixelValues(image: UIImage) -> [[UInt8]]? {
+        guard let cgImage = image.cgImage else { return nil }
+        
+        let width = cgImage.width
+        let height = cgImage.height
+        let colorSpace = CGColorSpaceCreateDeviceGray()
+        let rawData = UnsafeMutablePointer<UInt8>.allocate(capacity: width * height)
+        let bytesPerPixel = 1
+        let bytesPerRow = bytesPerPixel * width
+        let bitsPerComponent = 8
+        
+        guard let context = CGContext(data: rawData,
+                                      width: width,
+                                      height: height,
+                                      bitsPerComponent: bitsPerComponent,
+                                      bytesPerRow: bytesPerRow,
+                                      space: colorSpace,
+                                      bitmapInfo: CGImageAlphaInfo.none.rawValue) else {
+            rawData.deallocate()
+            return nil
+        }
+        
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        
+        var pixelValues = [[UInt8]](repeating: [UInt8](repeating: 0, count: width), count: height)
+        for y in 0..<height {
+            for x in 0..<width {
+                let index = y * width + x
+                pixelValues[y][x] = rawData[index]
+            }
+        }
+        
+        rawData.deallocate()
+        return pixelValues
+    }
+    
+    private func downscale(pixelValues: [[UInt8]], factor: Int) -> [[UInt8]] {
+        let height = pixelValues.count
+        let width = pixelValues[0].count
+        let downscaledHeight = height / factor
+        let downscaledWidth = width / factor
+        
+        var downscaledValues = [[UInt8]](repeating: [UInt8](repeating: 0, count: downscaledWidth), count: downscaledHeight)
+        
+        for y in 0..<downscaledHeight {
+            for x in 0..<downscaledWidth {
+                var sum: Int = 0
+                for dy in 0..<factor {
+                    for dx in 0..<factor {
+                        sum += Int(pixelValues[y * factor + dy][x * factor + dx])
+                    }
+                }
+                downscaledValues[y][x] = UInt8(sum / (factor * factor))
+            }
+        }
+        
+        return downscaledValues
+    }
+    
+    private func printGrayscalePixelValues(for image: UIImage) {
+        if let pixelValues = getGrayscalePixelValues(image: image) {
+            for row in pixelValues {
+                print(row)
+            }
+            
+            let downscaledValues = downscale(pixelValues: pixelValues, factor: 10)
+            print("Downscaled grayscale pixel values:")
+            for row in downscaledValues {
+                print(row)
+            }
+            print("Downscaled dimensions: \(downscaledValues[0].count) x \(downscaledValues.count)")
+        }
     }
 }
 
@@ -367,57 +417,79 @@ extension ViewController: AVCapturePhotoCaptureDelegate {
     
     private func processImage(_ image: UIImage) {
         guard let cgImage = image.cgImage else { return }
-        
+
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        let request = VNGeneratePersonSegmentationRequest()
-        request.qualityLevel = .accurate
-        request.outputPixelFormat = kCVPixelFormatType_OneComponent8
-        
+
         do {
-            try handler.perform([request])
-            guard let mask = request.results?.first?.pixelBuffer else { return }
-            
+            try handler.perform([segmentationRequest])
+            guard let mask = segmentationRequest.results?.first?.pixelBuffer else { return }
+
             let maskImage = CIImage(cvPixelBuffer: mask)
             let ciImage = CIImage(cgImage: cgImage)
-            
+
             let maskScaleX = ciImage.extent.width / maskImage.extent.width
             let maskScaleY = ciImage.extent.height / maskImage.extent.height
             let scaledMaskImage = maskImage.transformed(by: .init(scaleX: maskScaleX, y: maskScaleY))
-            
-            let blendFilter = CIFilter.blendWithRedMask()
+
+            if photoCount == 0 {
+                // Store the mask and image of the first photo
+                storedPersonMask = scaledMaskImage
+                storedImage = ciImage
+            }
+
+            let blendFilter = CIFilter.blendWithMask()
             blendFilter.inputImage = ciImage
-            blendFilter.maskImage = scaledMaskImage
+            blendFilter.maskImage = photoCount == 0 ? scaledMaskImage : storedPersonMask
             blendFilter.backgroundImage = CIImage(color: .white).cropped(to: ciImage.extent)
-            
+
             guard let outputImage = blendFilter.outputImage else { return }
             let context = CIContext()
             if let cgOutputImage = context.createCGImage(outputImage, from: outputImage.extent) {
                 let finalImage = UIImage(cgImage: cgOutputImage)
-                
+
                 // Save the final image
                 UIImageWriteToSavedPhotosAlbum(finalImage, self, #selector(self.imageSaved(_:didFinishSavingWithError:contextInfo:)), nil)
                 
+                // Convert to grayscale and save
+                if let grayscaleImage = convertToGrayscale(image: finalImage) {
+                    UIImageWriteToSavedPhotosAlbum(grayscaleImage, self, #selector(self.imageSaved(_:didFinishSavingWithError:contextInfo:)), nil)
+                    
+                    // Print the dimensions of the grayscale image
+                    print("Grayscale image dimensions for photo \(photoCount + 1): \(grayscaleImage.size.width) x \(grayscaleImage.size.height)")
+
+                    // Print grayscale pixel values to the console
+                    print("Grayscale pixel values for photo \(photoCount + 1):")
+                    printGrayscalePixelValues(for: grayscaleImage)
+                }
+
                 photoCount += 1
-                
+
                 if photoCount == 1 {
                     promptLabel.text = "Now make a face and take a second photo"
-                    blurEffectView.isHidden = false
-                    
+
+                    // Display the stored mask during the countdown
+                    if let mask = storedPersonMask {
+                        displayStoredMaskDuringCountdown(mask: mask)
+                    }
+
                     // Reset the flag to allow another photo after a short delay
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                         self.canTakePhoto = true
                     }
                 } else {
                     promptLabel.text = "Congratulations! You have completed the photo session."
-                    
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                        self.resetToStart()
-                    }
+                    restartButton.isHidden = false
+                    freezeScreen()
                 }
             }
         } catch {
             print("Failed to process image: \(error)")
         }
+    }
+    
+    private func freezeScreen() {
+        session?.stopRunning()
+        // Leave the preview layer visible to maintain the screen's appearance
     }
     
     @objc private func imageSaved(_ image: UIImage, didFinishSavingWithError error: Error?, contextInfo: UnsafeRawPointer) {
