@@ -450,8 +450,8 @@ extension ViewController: AVCapturePhotoCaptureDelegate {
                 // Save the final image
                 UIImageWriteToSavedPhotosAlbum(finalImage, self, #selector(self.imageSaved(_:didFinishSavingWithError:contextInfo:)), nil)
                 
-                // Convert to grayscale and save
-                if let grayscaleImage = convertToGrayscale(image: finalImage) {
+                // Convert the original image to grayscale and save it
+                if let grayscaleImage = convertToGrayscale(image: image) {
                     UIImageWriteToSavedPhotosAlbum(grayscaleImage, self, #selector(self.imageSaved(_:didFinishSavingWithError:contextInfo:)), nil)
                     
                     // Print the dimensions of the grayscale image
