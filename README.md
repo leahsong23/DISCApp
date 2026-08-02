@@ -1,7 +1,7 @@
 # Face Digital Image Speckle Correlation (DISC) Application
 **Non-Invasive, Accessible Tool to Detect Acoustic Neuroma**
 
-**Presenter(s):** Corey Zhang, Yoonsoo Song, Jerry Gu, Shreyaa Sanjay, Zihan Jia, Eugene Jiang, Brooklyn Ratel, Divleen Singh, Shi Fu, Huiting Luo, Miriam Rafailovich, Gurtej Singh  
+**Presenter(s):** Corey Zhang, Leah Song, Jerry Gu, Shreyaa Sanjay, Zihan Jia, Eugene Jiang, Brooklyn Ratel, Divleen Singh, Shi Fu, Huiting Luo, Miriam Rafailovich, Gurtej Singh  
 **Institutions:** Eastlake High School, Maclay School, Princeton International School of Mathematics and Science, West Windsor-Plainsboro High School North, The Experimental High School Attached to Beijing Normal University, Stony Brook University, The State University of New York  
 
 ---
